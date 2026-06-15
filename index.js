@@ -299,7 +299,7 @@
                 subtitle: seen ? 'Просмотрено' : '',
                 viewed: seen,
                 url: buildDirectUrl(torrent.hash, fileIndex),
-                label: name
+                label: prefix + name
             };
         });
 
