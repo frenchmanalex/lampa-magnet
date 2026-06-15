@@ -5,7 +5,7 @@
     //  CONFIG
     // ─────────────────────────────────────────────
     var PLUGIN_NAME    = 'TorrServer Library';
-    var PLUGIN_VERSION = '1.0.0';
+    var PLUGIN_VERSION = '1.1.0';
     var SETTINGS_KEY   = 'torrserver_plugin_settings';
 
     var defaultSettings = {
@@ -59,6 +59,30 @@
     }
 
     /**
+     * Fetch the list of viewed files from TorrServer
+     * POST /viewed  {"action":"list","hash":""}
+     * Returns an array of { hash, file_index } entries.
+     * An empty hash returns viewed entries for every torrent.
+     */
+    function fetchViewed(callback) {
+        var url = apiBase() + '/viewed';
+        $.ajax({
+            url: url,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ action: 'list', hash: '' }),
+            timeout: 8000,
+            success: function (data) {
+                var list = Array.isArray(data) ? data : [];
+                callback(null, list);
+            },
+            error: function (xhr, status, err) {
+                callback(err || status || 'Network error');
+            }
+        });
+    }
+
+    /**
      * Fetch file list for a torrent
      * POST /torrents  {"action":"get","hash":"..."}
      */
@@ -100,6 +124,51 @@
     //  HELPERS
     // ─────────────────────────────────────────────
     var VIDEO_EXT = /\.(mp4|mkv|avi|mov|m4v|ts|webm|flv|wmv|3gp|mpg|mpeg|m2ts|vob)$/i;
+
+    // Map: hash -> { fileIndex: true } of viewed files. Refreshed on each load.
+    var viewedMap = {};
+
+    function setViewedMap(list) {
+        viewedMap = {};
+        (list || []).forEach(function (v) {
+            if (!v || !v.hash) return;
+            if (!viewedMap[v.hash]) viewedMap[v.hash] = {};
+            viewedMap[v.hash][v.file_index] = true;
+        });
+    }
+
+    function isFileViewed(hash, fileIndex) {
+        return !!(viewedMap[hash] && viewedMap[hash][fileIndex]);
+    }
+
+    function viewedCount(hash) {
+        var m = viewedMap[hash];
+        if (!m) return 0;
+        var n = 0;
+        for (var k in m) if (Object.prototype.hasOwnProperty.call(m, k)) n++;
+        return n;
+    }
+
+    /**
+     * Extract the file list of a torrent. TorrServer exposes files either via
+     * `file_stats` (when the torrent is loaded) or inside the serialized `data`
+     * field (TorrServer.Files) when the torrent is only stored in the DB.
+     */
+    function extractFiles(obj) {
+        if (!obj) return [];
+        if (Array.isArray(obj.file_stats) && obj.file_stats.length) {
+            return obj.file_stats;
+        }
+        if (Array.isArray(obj)) return obj;
+        if (typeof obj.data === 'string' && obj.data) {
+            try {
+                var parsed = JSON.parse(obj.data);
+                var files = parsed && parsed.TorrServer && parsed.TorrServer.Files;
+                if (Array.isArray(files)) return files;
+            } catch (e) { /* ignore */ }
+        }
+        return [];
+    }
 
     function isVideo(filename) {
         return VIDEO_EXT.test(filename || '');
@@ -190,9 +259,16 @@
             // strip leading path
             name = name.split('/').pop().split('\\').pop();
             var size = formatSize(f.length || f.size);
+            var fileIndex = (f.id !== undefined ? f.id : idx);
+            var seen = isFileViewed(torrent.hash, fileIndex);
+            var mark = seen
+                ? '<span style="color:#46d369;margin-right:.4em">✓</span>'
+                : '<span style="opacity:.35;margin-right:.4em">○</span>';
             return {
-                title: name + (size ? '  <span style="opacity:.5;font-size:.85em">' + size + '</span>' : ''),
-                url: buildDirectUrl(torrent.hash, f.id !== undefined ? f.id : idx),
+                title: mark + name +
+                    (size ? '  <span style="opacity:.5;font-size:.85em">' + size + '</span>' : '') +
+                    (seen ? '  <span style="color:#46d369;font-size:.8em">просмотрено</span>' : ''),
+                url: buildDirectUrl(torrent.hash, fileIndex),
                 label: name
             };
         });
@@ -237,11 +313,34 @@
         var title  = Lampa.Utils.escapeHtml(torrentTitle(torrent));
         var size   = formatSize(torrent.torrent_size || torrent.size);
 
+        // Determine viewed status for this torrent
+        var videoFiles = extractFiles(torrent).filter(function (f) {
+            return isVideo(f.path || f.name || '');
+        });
+        var totalVideos = videoFiles.length;
+        var seen = 0;
+        videoFiles.forEach(function (f, idx) {
+            if (isFileViewed(torrent.hash, (f.id !== undefined ? f.id : idx))) seen++;
+        });
+        // Fallback when files cannot be parsed: use raw viewed entry count
+        if (totalVideos === 0) seen = viewedCount(torrent.hash);
+
+        var badge = '';
+        if (seen > 0 && totalVideos > 0 && seen >= totalVideos) {
+            badge = '<div class="ts-card__badge ts-card__badge--full" title="Просмотрено">✓</div>';
+        } else if (seen > 0) {
+            var label = (totalVideos > 1)
+                ? (seen + '/' + totalVideos)
+                : '✓';
+            badge = '<div class="ts-card__badge ts-card__badge--part" title="Частично просмотрено">' + label + '</div>';
+        }
+
         var $card = $([
-            '<div class="ts-card selector" tabindex="0">',
+            '<div class="ts-card selector' + (seen > 0 ? ' ts-card--viewed' : '') + '" tabindex="0">',
             '  <div class="ts-card__poster">',
             '    <img src="' + poster + '" onerror="this.src=\'./img/icons/movie.svg\'" loading="lazy" />',
             '    <div class="ts-card__play"><svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg></div>',
+            badge,
             '  </div>',
             '  <div class="ts-card__info">',
             '    <div class="ts-card__title">' + title + '</div>',
@@ -256,8 +355,8 @@
                     Lampa.Noty.show('Ошибка получения файлов: ' + err);
                     return;
                 }
-                var files = (data && data.file_stats) ? data.file_stats :
-                            (Array.isArray(data) ? data : []);
+                var files = extractFiles(data);
+                if (!files.length) files = extractFiles(torrent);
                 showFileSelector(torrent, files);
             });
         });
@@ -303,34 +402,40 @@
             $grid.empty();
             items = [];
 
-            fetchTorrents(function (err, torrents) {
-                self.activity.loader(false);
-                $status.hide();
+            // Load the viewed list first so cards can reflect watch status,
+            // then load the torrents. A viewed-list failure is non-fatal.
+            fetchViewed(function (vErr, viewedList) {
+                setViewedMap(vErr ? [] : viewedList);
 
-                if (err) {
-                    $status
-                        .html('<b>Ошибка подключения к TorrServer</b><br>' +
-                              '<small>' + (err.toString()) + '</small><br>' +
-                              '<small>' + apiBase() + '</small>')
-                        .addClass('ts-status--error')
-                        .show();
+                fetchTorrents(function (err, torrents) {
                     self.activity.loader(false);
-                    return;
-                }
+                    $status.hide();
 
-                if (!torrents.length) {
-                    $status.text('Раздач нет. Добавьте торренты в TorrServer.').show();
-                    return;
-                }
+                    if (err) {
+                        $status
+                            .html('<b>Ошибка подключения к TorrServer</b><br>' +
+                                  '<small>' + (err.toString()) + '</small><br>' +
+                                  '<small>' + apiBase() + '</small>')
+                            .addClass('ts-status--error')
+                            .show();
+                        self.activity.loader(false);
+                        return;
+                    }
 
-                torrents.forEach(function (torrent) {
-                    var $card = buildCard(torrent);
-                    items.push($card[0]);
-                    $grid.append($card);
+                    if (!torrents.length) {
+                        $status.text('Раздач нет. Добавьте торренты в TorrServer.').show();
+                        return;
+                    }
+
+                    torrents.forEach(function (torrent) {
+                        var $card = buildCard(torrent);
+                        items.push($card[0]);
+                        $grid.append($card);
+                    });
+
+                    scroll.append($html);
+                    Lampa.Controller.enable('content');
                 });
-
-                scroll.append($html);
-                Lampa.Controller.enable('content');
             });
         };
 
@@ -455,7 +560,18 @@
             '.ts-card__title { font-size:.82em; line-height:1.35; color:#eee;',
             '  display:-webkit-box; -webkit-line-clamp:2;',
             '  -webkit-box-orient:vertical; overflow:hidden; }',
-            '.ts-card__size { font-size:.72em; color:#888; margin-top:.3em; }'
+            '.ts-card__size { font-size:.72em; color:#888; margin-top:.3em; }',
+
+            /* viewed badge */
+            '.ts-card__badge { position:absolute; top:.5em; right:.5em; z-index:2;',
+            '  min-width:1.9em; height:1.9em; padding:0 .45em; border-radius:1em;',
+            '  display:flex; align-items:center; justify-content:center;',
+            '  font-size:.8em; font-weight:700; color:#fff; line-height:1;',
+            '  box-shadow:0 2px 8px rgba(0,0,0,.5); }',
+            '.ts-card__badge--full { background:#46d369; }',
+            '.ts-card__badge--part { background:rgba(0,0,0,.7); border:1px solid #46d369;',
+            '  color:#46d369; }',
+            '.ts-card--viewed .ts-card__poster img { filter:brightness(.78); }'
         ].join('\n');
 
         var $style = $('<style id="ts-plugin-styles">').text(css);
