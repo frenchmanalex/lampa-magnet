@@ -5,7 +5,7 @@
     //  CONFIG
     // ─────────────────────────────────────────────
     var PLUGIN_NAME    = 'TorrServer Library';
-    var PLUGIN_VERSION = '1.1.0';
+    var PLUGIN_VERSION = '1.1.1';
     var SETTINGS_KEY   = 'torrserver_plugin_settings';
 
     var defaultSettings = {
@@ -83,6 +83,27 @@
     }
 
     /**
+     * Fetch the viewed files for a single torrent
+     * POST /viewed  {"action":"list","hash":"..."}
+     */
+    function fetchViewedForHash(hash, callback) {
+        var url = apiBase() + '/viewed';
+        $.ajax({
+            url: url,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ action: 'list', hash: hash }),
+            timeout: 8000,
+            success: function (data) {
+                callback(null, Array.isArray(data) ? data : []);
+            },
+            error: function (xhr, status, err) {
+                callback(err || status || 'Network error');
+            }
+        });
+    }
+
+    /**
      * Fetch file list for a torrent
      * POST /torrents  {"action":"get","hash":"..."}
      */
@@ -134,6 +155,14 @@
             if (!v || !v.hash) return;
             if (!viewedMap[v.hash]) viewedMap[v.hash] = {};
             viewedMap[v.hash][v.file_index] = true;
+        });
+    }
+
+    function mergeViewedForHash(hash, list) {
+        viewedMap[hash] = {};
+        (list || []).forEach(function (v) {
+            if (!v) return;
+            viewedMap[hash][v.file_index] = true;
         });
     }
 
@@ -261,13 +290,14 @@
             var size = formatSize(f.length || f.size);
             var fileIndex = (f.id !== undefined ? f.id : idx);
             var seen = isFileViewed(torrent.hash, fileIndex);
-            var mark = seen
-                ? '<span style="color:#46d369;margin-right:.4em">✓</span>'
-                : '<span style="opacity:.35;margin-right:.4em">○</span>';
+            // Plain-text marker prefix (renders regardless of HTML support),
+            // plus a colored span and a subtitle for clear viewed indication.
+            var prefix = seen ? '\u2705 ' : '\u25CB ';
+            var sizeHtml = size ? '  <span style="opacity:.5;font-size:.85em">' + size + '</span>' : '';
             return {
-                title: mark + name +
-                    (size ? '  <span style="opacity:.5;font-size:.85em">' + size + '</span>' : '') +
-                    (seen ? '  <span style="color:#46d369;font-size:.8em">просмотрено</span>' : ''),
+                title: prefix + name + sizeHtml,
+                subtitle: seen ? 'Просмотрено' : '',
+                viewed: seen,
                 url: buildDirectUrl(torrent.hash, fileIndex),
                 label: name
             };
@@ -350,14 +380,20 @@
         ].join(''));
 
         $card.on('hover:enter click', function () {
-            fetchTorrentFiles(torrent.hash, function (err, data) {
-                if (err) {
-                    Lampa.Noty.show('Ошибка получения файлов: ' + err);
-                    return;
-                }
-                var files = extractFiles(data);
-                if (!files.length) files = extractFiles(torrent);
-                showFileSelector(torrent, files);
+            // Refresh viewed status for this torrent so the file list always
+            // reflects the latest watched state, then load the file list.
+            fetchViewedForHash(torrent.hash, function (vErr, viewedList) {
+                if (!vErr) mergeViewedForHash(torrent.hash, viewedList);
+
+                fetchTorrentFiles(torrent.hash, function (err, data) {
+                    if (err) {
+                        Lampa.Noty.show('Ошибка получения файлов: ' + err);
+                        return;
+                    }
+                    var files = extractFiles(data);
+                    if (!files.length) files = extractFiles(torrent);
+                    showFileSelector(torrent, files);
+                });
             });
         });
 
