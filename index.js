@@ -292,12 +292,14 @@
             var seen = isFileViewed(torrent.hash, fileIndex);
             // Plain-text marker prefix (renders regardless of HTML support),
             // plus a colored span and a subtitle for clear viewed indication.
-            var prefix = seen ? '\u2705 ' : '\u25CB ';
+            var prefix = seen ? 'Просмотрено.' : '';
             var sizeHtml = size ? '  <span style="opacity:.5;font-size:.85em">' + size + '</span>' : '';
             return {
                 title: prefix + name + sizeHtml,
                 subtitle: seen ? 'Просмотрено' : '',
-                viewed: seen,
+                checked: seen,
+                checkbox: seen,
+                picked: seen,
                 url: buildDirectUrl(torrent.hash, fileIndex),
                 label: prefix + name
             };
